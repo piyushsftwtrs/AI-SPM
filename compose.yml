@@ -555,13 +555,26 @@ services:
 
   # ── AI SPM Platform ──────────────────────────────────────────────────────────
 
-  # spm-db (single-pod Postgres) was removed in May 2026.  CNPG (in
-  # the kind cluster) is the only Postgres backend; compose is now used
-  # only for `docker compose build` to produce service images that get
-  # pushed to localhost:5001 and pulled by kind.  Services below still
-  # carry SPM_DB_URL env vars pointing at `spm-db:5432` as documentation
-  # of the expected URL — those names won't resolve in a `compose up`,
-  # but `compose up` is not a supported workflow anymore.
+  # Local development database. Production Kubernetes deployments use the
+  # CNPG-managed database instead; this service exists so `docker compose up`
+  # remains a complete, runnable developer workflow.
+  spm-db:
+    image: postgres:16-alpine
+    container_name: cpm-spm-db
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_DB: spm
+      POSTGRES_USER: spm_rw
+      POSTGRES_PASSWORD: ${SPM_DB_PASSWORD:-spmpass}
+    volumes:
+      - ./DataVolumes/spm-db:/var/lib/postgresql/data
+    healthcheck:
+      # Force a TCP probe. During initdb Postgres briefly accepts connections
+      # on its Unix socket before the final TCP server is ready.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U spm_rw -d spm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   spm-api:
     build:
@@ -633,6 +646,9 @@ services:
       # both spm-api AND the runtime container need to see the same
       # path. Bind-mount the host directory.
       - ./DataVolumes/agents:/app/DataVolumes/agents
+    depends_on:
+      spm-db:
+        condition: service_healthy
     # Integrations' Test-connection probe hits host-side Ollama at
     # host.docker.internal:11434.  Most desktop docker setups auto-resolve
     # this; Linux needs the explicit host-gateway mapping.
@@ -724,6 +740,8 @@ services:
       retries: 5
     depends_on:
       <<: *depends-platform
+      spm-db:
+        condition: service_healthy
 
   threat-hunting-agent:
     build:

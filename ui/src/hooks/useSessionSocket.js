@@ -95,6 +95,10 @@ export function useSessionSocket() {
   const wsRef       = useRef(null)
   const timerRef    = useRef(null)
   const attemptsRef = useRef(0)
+  // Monotonically increasing request id. getToken() is asynchronous, so a
+  // prior connect request can otherwise resume after a newer session was
+  // selected and replace that newer socket.
+  const connectIdRef = useRef(0)
   const seenRef     = useRef(new Set())   // dedup keys
 
   // ── Internal helpers ────────────────────────────────────────────────────────
@@ -116,7 +120,7 @@ export function useSessionSocket() {
 
   // ── Core connect ────────────────────────────────────────────────────────────
 
-  const _doConnect = useCallback(async (sessionId) => {
+  const _doConnect = useCallback(async (sessionId, connectId) => {
     // Tear down any previous socket FIRST — handlers detached so its later
     // onclose cannot interfere with this new connection.
     if (wsRef.current) {
@@ -128,6 +132,9 @@ export function useSessionSocket() {
     setConnectionStatus(attemptsRef.current > 0 ? 'reconnecting' : 'connecting')
 
     const token = await getToken()
+    // A newer connect/disconnect happened while authentication was pending.
+    // Do not let this stale request construct a socket for the old session.
+    if (connectIdRef.current !== connectId) return
     const url = `${WS_BASE}/ws/sessions/${sessionId}${token ? `?token=${encodeURIComponent(token)}` : ''}`
     let ws
     try {
@@ -205,7 +212,7 @@ export function useSessionSocket() {
         attemptsRef.current++
         const delay = BACKOFF_BASE_MS * (2 ** (attemptsRef.current - 1))
         setConnectionStatus('reconnecting')
-        timerRef.current = setTimeout(() => _doConnect(sessionId), delay)
+        timerRef.current = setTimeout(() => _doConnect(sessionId, connectId), delay)
       } else {
         setConnectionStatus('closed')
       }
@@ -220,16 +227,19 @@ export function useSessionSocket() {
    */
   const connectWs = useCallback((sessionId) => {
     _closeSocket()
+    const connectId = ++connectIdRef.current
     attemptsRef.current = 0
     seenRef.current     = new Set()
     setLiveEvents([])
-    _doConnect(sessionId)
+    _doConnect(sessionId, connectId)
   }, [_closeSocket, _doConnect])
 
   /**
    * Deliberately close the WebSocket and reset to idle.
    */
   const disconnectWs = useCallback(() => {
+    // Invalidate a connect currently waiting for getToken().
+    ++connectIdRef.current
     _closeSocket()
     attemptsRef.current = 0
     seenRef.current     = new Set()
